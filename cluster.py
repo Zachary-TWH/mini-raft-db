@@ -44,7 +44,7 @@ def get_alive_nodes(my_address):
 
     for peer in PEERS:
         try:
-            with httpx.Client(timeout=10.0) as client:
+            with httpx.Client(timeout=1.0) as client:
                 response = client.get(f"{peer}/health")
 
                 if response.status_code == 200:
@@ -145,7 +145,7 @@ def monitor_leader(my_address, elect_leader):
 
         if my_address != LEADER:
 
-            if time.time() - LAST_HEARTBEAT > 5:
+            if time.time() - LAST_HEARTBEAT >10:
 
                 print("Heartbeat timeout!")
 

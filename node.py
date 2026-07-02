@@ -3,7 +3,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 import os
 import httpx
-import time
 import storage
 import consensus
 import cluster

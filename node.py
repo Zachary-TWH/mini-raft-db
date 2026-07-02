@@ -113,7 +113,7 @@ def put(key: str, value: str):
                     pass
 
     # If we have enough acknowledgments, commit the entry
-    if acks >= 2:
+    if acks >= 3:
 
         storage.pending_entries.append({
             "index": entry_index,

@@ -16,7 +16,9 @@ import storage
 PEERS = [
     "http://node1:8000",
     "http://node2:8000",
-    "http://node3:8000"
+    "http://node3:8000",
+    "http://node4:8000",
+    "http://node5:8000"
 ]
 
 LEADER = "http://node1:8000"

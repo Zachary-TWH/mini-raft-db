@@ -20,3 +20,17 @@ services:
       - "8003:8000"
     environment:
       - MY_ADDRESS=http://node3:8000
+
+  node4:
+    image: my-kv-store:latest
+    ports:
+      - "8004:8000"
+    environment:
+      - MY_ADDRESS=http://node4:8000
+
+  node5:
+    image: my-kv-store:latest
+    ports:
+      - "8005:8000"
+    environment:
+      - MY_ADDRESS=http://node5:8000

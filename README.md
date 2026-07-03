@@ -1,6 +1,6 @@
 # Distributed Key-Value Store
 
-A 3-node key-value store built with FastAPI, HTTP, and Docker Compose to explore core distributed consensus concepts. Implements leader election, log replication, write-ahead logging, and crash recovery. Loosely based on Raft, with some parts simplified for clarity.
+A 5-node key-value store built with FastAPI, HTTP, and Docker Compose to explore core distributed consensus concepts. Implements leader election, log replication, write-ahead logging, and crash recovery. Loosely based on Raft, with some parts simplified for clarity.
 
 ## Features
 

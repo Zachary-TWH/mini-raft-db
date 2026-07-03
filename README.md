@@ -1,19 +1,46 @@
 # Distributed Key-Value Store
 
-A simplified distributed key-value database built in Python to explore the core concepts behind distributed consensus systems such as Raft.
+A 3-node key-value store built with FastAPI, HTTP, and Docker Compose to explore core distributed consensus concepts. Implements leader election, log replication, write-ahead logging, and crash recovery. Loosely based on Raft, with some parts simplified for clarity.
 
-The project simulates a cluster of three nodes running in Docker containers. It implements leader election, log replication, majority-based commits, write-ahead logging, crash recovery, and node catch-up after failure. While inspired by Raft, the implementation intentionally simplifies several production features to focus on understanding the fundamental ideas behind distributed databases.
+## Features
 
-## Motivation
+- Leader election using terms and majority voting
+- Heartbeat-based failure detection and failover
+- Log-aware voting to prevent stale leader election
+- Leader-to-follower log replication
+- Majority acknowledgement required before commit
+- Ordered commits via commit index
+- Write-ahead log for durability
+- Crash recovery from disk on restart
+- Log catch-up for lagging nodes
+- Leader-only reads for strong consistency
+- REST API with standard HTTP status codes
 
-The goal of this project was not to build a production-ready database, but to gain a practical understanding of distributed systems by implementing the core mechanisms from scratch. Rather than relying on existing consensus libraries, every major component—including leader election, replication, commit coordination, persistence, and recovery—was designed and implemented manually.
+## Stack
 
-## Tech Stack
+Python, FastAPI, httpx (inter-node communication), Docker Compose, write-ahead log (`w2.log`) for persistence.
 
-* **Language:** Python
-* **Framework:** FastAPI
-* **Networking:** HTTP (`httpx`)
-* **Deployment:** Docker & Docker Compose
-* **Persistence:** Write-ahead log (`w2.log`)
+## Topology
 
-By the end of the project, the database supports automatic leader election, fault-tolerant writes through majority acknowledgement, durable storage via a write-ahead log, and automatic recovery and synchronization when failed nodes rejoin the cluster.
+3 identical nodes — 1 leader, 2 followers, same code on each.
+
+\`\`\`bash
+docker build -t my-kv-store .
+docker compose up -d
+\`\`\`
+
+\`\`\`bash
+curl -X PUT "http://localhost:8001/put/a?value=100"
+curl "http://localhost:8001/get/a"
+\`\`\`
+
+## Design Notes
+
+- Built from scratch instead of using a consensus library, for learning purposes.
+- Prioritized clarity over production-level optimization.
+- Kept as a single file until the system was feature-complete, then refactored.
+- Leader-only reads chosen for simplicity and strong consistency.
+
+## Limitations
+
+No randomized election timeouts, no `lastLogTerm` check, term/vote state not persisted, no log compaction/snapshots, no dynamic membership, no quorum reads. Omitted to keep focus on core consensus mechanics.

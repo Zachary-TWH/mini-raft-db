@@ -24,15 +24,15 @@ Python, FastAPI, httpx (inter-node communication), Docker Compose, write-ahead l
 
 3 identical nodes — 1 leader, 2 followers, same code on each.
 
-\`\`\`bash
+
 docker build -t my-kv-store .
 docker compose up -d
-\`\`\`
 
-\`\`\`bash
+
+
 curl -X PUT "http://localhost:8001/put/a?value=100"
 curl "http://localhost:8001/get/a"
-\`\`\`
+
 
 ## Design Notes
 

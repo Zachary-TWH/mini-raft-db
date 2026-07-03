@@ -22,7 +22,7 @@ Python, FastAPI, httpx (inter-node communication), Docker Compose, write-ahead l
 
 ## Topology
 
-3 identical nodes — 1 leader, 2 followers, same code on each.
+5 identical nodes — 1 leader, 4 followers, same code on each.
 
 
 docker build -t my-kv-store .

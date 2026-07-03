@@ -144,7 +144,7 @@ def monitor_leader(my_address, elect_leader):
     while True:
 
         if my_address != LEADER:
-
+            
             if time.time() - LAST_HEARTBEAT >10:
 
                 print("Heartbeat timeout!")

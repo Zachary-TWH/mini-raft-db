@@ -1,17 +1,19 @@
 """
-Cluster layer: peer list, leader/heartbeat tracking, log catch-up,
-and the background loops that watch the leader and send heartbeats.
+Cluster layer: peer list, leader tracking, and the leader-driven
+replication loop (canonical Raft AppendEntries push, doubles as heartbeat).
 
-Owns: PEERS, LEADER, LEADER_LOG_INDEX, LAST_HEARTBEAT,
-get_alive_nodes, catch_up_logs, send_heartbeats, monitor_leader.
+Owns: PEERS, LEADER, next_index, match_index, monitor_leader,
+replication_loop.
 
-monitor_leader takes elect_leader as a parameter (it lives in
-consensus.py / main.py) to avoid a circular import.
+catch_up_logs / send_heartbeats / LEADER_LOG_INDEX are gone — replication
+is now leader-push, not follower-pull, so there is nothing left for a
+follower to "catch up" on its own.
 """
 
 import time
 import httpx
 import storage
+import random
 
 PEERS = [
     "http://node1:8000",
@@ -22,8 +24,10 @@ PEERS = [
 ]
 
 LEADER = "http://node1:8000"
-LEADER_LOG_INDEX = 0
 LAST_HEARTBEAT = time.time()
+
+next_index = {}   # peer -> next log index the leader will send that peer
+match_index = {}  # peer -> highest log index known replicated on that peer
 
 
 def set_leader(new_leader):
@@ -31,13 +35,23 @@ def set_leader(new_leader):
     LEADER = new_leader
 
 
-def note_heartbeat(log_index):
-    """Record that a heartbeat was just received, and the leader's log index."""
-    global LAST_HEARTBEAT
-    global LEADER_LOG_INDEX
-    LAST_HEARTBEAT = time.time()
-    LEADER_LOG_INDEX = log_index
+def quorum_size():
+    """Majority needed out of the full configured cluster (not just alive nodes)."""
+    return (len(PEERS) // 2) + 1
 
+
+def reset_leader_state(my_address):
+    """Called whenever we become leader. next_index/match_index only make
+    sense for whoever currently holds leadership, so they get reset fresh."""
+    last_index = storage.last_log_index()
+    for peer in PEERS:
+        if peer != my_address:
+            next_index[peer] = last_index + 1
+            match_index[peer] = 0
+
+def note_heartbeat():
+    global LAST_HEARTBEAT
+    LAST_HEARTBEAT = time.time()
 
 def get_alive_nodes(my_address):
     alive = []
@@ -46,122 +60,124 @@ def get_alive_nodes(my_address):
         try:
             with httpx.Client(timeout=1.0) as client:
                 response = client.get(f"{peer}/health")
-
                 if response.status_code == 200:
                     alive.append(peer)
-
         except:
             pass
 
     return alive
 
 
-def catch_up_logs(my_address):
+def replicate_to_peer(client, my_address, peer, current_term):
+    """
+    Send this peer whatever it's missing, starting from next_index[peer].
+    On success, advance match_index/next_index. On log mismatch, back off
+    next_index by one and let the next tick retry further back.
+    """
+
+    ni = next_index.get(peer, storage.last_log_index() + 1)
+    prev_index = ni - 1
+    prev_term = storage.term_at(prev_index)
+    #return entries that are at or after next_index[peer]
+    entries = [e for e in storage.LOG_ENTRIES if e["index"] >= ni]
+
     try:
-        with httpx.Client() as client:
+        response = client.put(
+            f"{peer}/internal/append_entries",
+            json={
+                "term": current_term,
+                "leader": my_address,
+                "prev_log_index": prev_index,
+                "prev_log_term": prev_term,
+                "entries": entries,
+                "leader_commit": storage.COMMIT_INDEX
+            },
+            timeout=2.0
+        )
+        result = response.json()
 
-            for peer in PEERS:
+        if result.get("success"):
+            if entries:
+                match_index[peer] = entries[-1]["index"]
+                next_index[peer] = match_index[peer] + 1
+            return True
 
-                if peer == my_address:
-                    continue
-
-                response = client.get(
-                    f"{peer}/logs",
-                    params={"after": storage.LOG_INDEX}
-                )
-
-                entries = response.json()
-
-                if entries:
-
-                    print(
-                        "CATCHING UP:",
-                        len(entries),
-                        "entries"
-                    )
-
-                for entry in entries:
-                        
-                    storage.store[entry["key"]] = entry["value"]
-
-                    storage.write_to_log(
-                        entry["index"],
-                        entry["key"],
-                        entry["value"]
-                    )
-
-                    storage.bump_log_index(entry["index"])
-
-                break
+        next_index[peer] = max(1, ni - 1)
+        return False
 
     except:
-        pass
+        return False
 
 
-def send_heartbeats(my_address, current_term_getter):
+def advance_commit_index(my_address, current_term):
     """
-    Loop forever, sending heartbeats to peers whenever we are the leader.
-    current_term_getter is a zero-arg callable returning the current Raft
-    term (consensus.CURRENT_TERM at call time, since it changes over time).
+    Raft commit rule: an entry is committed once a majority of nodes have
+    matched it, AND it's from the leader's current term (this is the part
+    that's easy to get wrong — you cannot commit older-term entries purely
+    by count, only by riding along with a current-term entry that commits).
+    """
+    for n in range(storage.last_log_index(), storage.COMMIT_INDEX, -1):
+        if storage.term_at(n) != current_term:
+            continue
+
+        matched = 1  # ourselves
+        for peer in PEERS:
+            if peer != my_address and match_index.get(peer, 0) >= n:
+                matched += 1
+
+        if matched >= quorum_size():
+            storage.apply_committed(n)
+            break
+
+
+def replication_loop(my_address, current_term_getter):
+    """
+    Runs forever. While we're leader, push AppendEntries to every peer on
+    a fixed tick — this is both replication and the heartbeat (an empty
+    entries list is just a heartbeat). This replaces send_heartbeats.
     """
     while True:
-
         if my_address == LEADER:
-
             with httpx.Client() as client:
-
                 for peer in PEERS:
-
                     if peer != my_address:
+                        replicate_to_peer(client, my_address, peer, current_term_getter())
 
-                        try:
-                            client.put(
-                                f"{peer}/heartbeat",
-                                params={
-                                    "term": current_term_getter(),
-                                    "leader": LEADER,
-                                    "log_index": storage.LOG_INDEX
-                                }
-                            )
+            advance_commit_index(my_address, current_term_getter())
 
-                        except:
-                            pass
-
-        time.sleep(2)
+        time.sleep(0.5)
 
 
 def monitor_leader(my_address, elect_leader):
     """
-    Loop forever. If we're not the leader and haven't heard a heartbeat
-    in 5s, run an election. elect_leader is a zero-arg callable
-    (main.elect_leader, which already knows how to call consensus.elect_leader).
+    Loop forever. If we're not the leader and haven't heard from one in
+    10s, run an election. elect_leader is a zero-arg callable.
     """
-    global LEADER
-    global LAST_HEARTBEAT
+    global LEADER, LAST_HEARTBEAT
 
-    time.sleep(5)
-
+    time.sleep(random.uniform(3, 6))
+    election_timeout = random.uniform(10, 20)
+    # monitoring loop: if we haven't heard from the leader in 10s, start an election
     while True:
-
         if my_address != LEADER:
-            
-            if time.time() - LAST_HEARTBEAT >10:
-
+            if time.time() - LAST_HEARTBEAT > election_timeout:
                 print("Heartbeat timeout!")
 
+                # best candidate from function consensus.elect_leader() is returned    
                 new_leader = elect_leader()
 
                 if new_leader:
-
                     LEADER = new_leader
 
+                    # if i am the new leader, reset next_index and match_index for all peers
+                    if new_leader == my_address:
+                        reset_leader_state(my_address)
+
+                    # tell followers who the new leader is, and reset our vote for this term
                     with httpx.Client() as client:
                         for peer in PEERS:
                             try:
-                                client.put(
-                                    f"{peer}/leader",
-                                    params={"new_leader": new_leader}
-                                )
+                                client.put(f"{peer}/leader", params={"new_leader": new_leader})
                             except:
                                 pass
 

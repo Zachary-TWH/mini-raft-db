@@ -1,97 +1,117 @@
 """
 Storage layer: in-memory key-value store + append-only log on disk.
 
-Owns: store, LOG_INDEX, LOG_ENTRIES, pending_entries, LAST_COMMITTED_INDEX.
-Nothing in this module knows about HTTP, peers, or Raft elections.
+Log entries now carry a `term` (canonical Raft requirement). LOG_ENTRIES is
+the full log — committed and uncommitted tail — indexed contiguously from 1.
+Disk only ever receives entries once they're committed.
 """
 
 LOG_FILE = "w2.log"
 store = {}
-LOG_INDEX = 0
-LOG_ENTRIES = []
-pending_entries = []
-LAST_COMMITTED_INDEX = 0
+LOG_ENTRIES = []       # [{index, term, key, value}], contiguous from index 1
+COMMIT_INDEX = 0
 
-
+# Storage API
 def recover_from_log():
-    """Rebuild `store` and `LOG_ENTRIES` from disk on startup."""
-    global LOG_INDEX
-    global LAST_COMMITTED_INDEX
+    global COMMIT_INDEX
 
     try:
         with open(LOG_FILE, "r") as f:
             for line in f:
-                index, key, value = line.strip().split(", ")
-                index = int(index)
+                index, term, key, value = line.strip().split(", ")
+                index, term = int(index), int(term)
 
                 store[key] = value
-
+                # it append everything right now
                 LOG_ENTRIES.append({
                     "index": index,
+                    "term": term,
                     "key": key,
                     "value": value
                 })
 
-                LOG_INDEX = max(LOG_INDEX, index)
-
-        # Everything already on disk is committed
-        LAST_COMMITTED_INDEX = LOG_INDEX
+        COMMIT_INDEX = LOG_ENTRIES[-1]["index"] if LOG_ENTRIES else 0
 
         print("Recovered:", store)
-        print("Recovered LOG_INDEX:", LOG_INDEX)
-        print("Recovered LAST_COMMITTED_INDEX:", LAST_COMMITTED_INDEX)
+        print("Recovered COMMIT_INDEX:", COMMIT_INDEX)
 
     except FileNotFoundError:
         print("No log found, starting empty")
 
 
-def write_to_log(index, key, value):
-    """Append a committed entry to the in-memory log and to disk."""
+def last_log_index():
+    return LOG_ENTRIES[-1]["index"] if LOG_ENTRIES else 0
+
+def last_log_term():
+    return LOG_ENTRIES[-1]["term"] if LOG_ENTRIES else 0
+
+def term_at(index):
+    if index == 0:
+        return 0
+    entry = get_entry(index)
+    return entry["term"] if entry else 0
+
+
+def get_entry(index):
+    """O(1) lookup assuming LOG_ENTRIES stays contiguous from index 1."""
+    pos = index - 1
+    if 0 <= pos < len(LOG_ENTRIES) and LOG_ENTRIES[pos]["index"] == index:
+        return LOG_ENTRIES[pos]
+    return None
+
+def append_entry(term, key, value):
+    """Leader-only: append a new uncommitted entry, return it."""
     entry = {
-        "index": index,
+        "index": last_log_index() + 1,
+        "term": term,
         "key": key,
         "value": value
     }
-
     LOG_ENTRIES.append(entry)
-
-    with open(LOG_FILE, "a") as f:
-        f.write(f"{index}, {key}, {value}\n")
+    return entry
 
 
-def bump_log_index(new_index):
-    """Raise LOG_INDEX to new_index if it's higher than the current value."""
-    global LOG_INDEX
-    LOG_INDEX = max(LOG_INDEX, new_index)
-
-
-def next_log_index():
-    """Increment and return LOG_INDEX (used by the leader when accepting a write)."""
-    global LOG_INDEX
-    LOG_INDEX += 1
-    return LOG_INDEX
-
-
-def commit_entry(key, value, index):
+def append_entries_from_leader(prev_log_index, prev_log_term, entries, leader_commit):
     """
-    Apply a pending entry to the store if it's the next one expected
-    in commit order. Returns the committed entry dict, or None if no
-    matching pending entry was found.
+    Follower-side AppendEntries handling.
+    Returns False (leader should back off nextIndex and retry) if our log
+    doesn't agree with the leader's at prev_log_index.
     """
-    global LAST_COMMITTED_INDEX
+    if prev_log_index > 0 and term_at(prev_log_index) != prev_log_term:
+        return False
 
-    for entry in pending_entries:
-        if entry["index"] == index and index == LAST_COMMITTED_INDEX + 1:
-            store[key] = value
-            write_to_log(index, key, value)
-            bump_log_index(index)
+    for entry in entries:
+        existing = get_entry(entry["index"])
+        # if existing data and its term don't match, delete everything from that index onwards
+        if existing and existing["term"] != entry["term"]:
 
-            pending_entries.remove(entry)
+            del LOG_ENTRIES [entry["index"] - 1:]
 
-            LAST_COMMITTED_INDEX = index
-            print("COMMITTING INDEX:", index)
-            print("COMMITTED:", index, "LAST:", LAST_COMMITTED_INDEX)
+            existing = None
+        # and append new entry
+        if not existing:
+            LOG_ENTRIES.append(entry)
 
-            return entry
+    if leader_commit > COMMIT_INDEX:
+        # apply the new entries to the store, up to the minimum of leader_commit and last_log_index, and update COMMIT_INDEX accordingly
+        apply_committed(min(leader_commit, last_log_index()))
 
-    return None
+    return True
+
+
+def apply_committed(index):
+    """Advance COMMIT_INDEX up to `index`, applying entries to store + disk."""
+    global COMMIT_INDEX
+
+    for i in range(COMMIT_INDEX + 1, index + 1):
+        entry = get_entry(i)
+        if entry is None:
+            break
+
+        store[entry["key"]] = entry["value"]
+
+        with open(LOG_FILE, "a") as f:
+            f.write(f"{entry['index']}, {entry['term']}, {entry['key']}, {entry['value']}\n")
+
+        COMMIT_INDEX = i
+        print("COMMITTED:", i)

@@ -14,68 +14,13 @@ import httpx
 CURRENT_TERM = 0
 VOTED_TERM = -1
 VOTED_FOR = None
+STATE = "follower"   # "follower" | "candidate" | "leader"
 
 
 def start_new_term():
     global CURRENT_TERM
     CURRENT_TERM += 1
     return CURRENT_TERM
-
-
-def request_votes(candidate, term, my_address, peers, my_log_index, my_log_term):
-    """Ask all peers to vote for `candidate` in `term`. Returns vote count (including self)."""
-
-    self_result = handle_vote_request(
-        candidate, term, my_log_index, my_log_term, my_log_index, my_log_term
-    )
-    
-    votes = 1 if self_result["vote_for"] == candidate else 0
-
-    for peer in peers:
-        if peer != my_address:
-            try:
-                with httpx.Client(timeout=2.0) as client:
-                    response = client.put(
-                        f"{peer}/vote",
-                        params={
-                            "candidate": candidate,
-                            "term": term,
-                            "log_index": my_log_index,
-                            "log_term": my_log_term
-                        }
-                    )
-                    if response.json()["vote_for"] == candidate:
-                        votes += 1
-            except:
-                pass
-
-    print("Starting election term", term)
-    return votes
-
-
-def elect_leader(my_address, peers, my_log_index, my_log_term, get_alive_nodes, quorum):
-    """
-    Run one election round: bump term, ask all alive nodes for votes,
-    return the candidate with a majority, or None.
-    """
-    term = start_new_term()
-
-    best_candidate = None
-    best_votes = 0
-
-    for candidate in get_alive_nodes():
-        votes = request_votes(candidate, term, my_address, peers, my_log_index, my_log_term)
-        print(candidate, "got votes:", votes)
-        # first come first serve because the first one meet the quorum will be elected as the leader 
-        # and based on peer list order, the first one will be the best candidate due to the usage of ">"
-        if votes > best_votes:
-            best_votes = votes
-            best_candidate = candidate
-
-    if best_votes >= quorum:
-        return best_candidate
-
-    return None
 
 # Handle incoming vote requests from other nodes and determine whether to grant the vote based on the Raft voting rules.
 def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term, my_log_index, my_log_term):
@@ -84,20 +29,21 @@ def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term
     A candidate's log is "at least as up to date" if its last entry has a
     higher term, or the same term with an index >= ours.
     """
-    global CURRENT_TERM, VOTED_TERM, VOTED_FOR
+    global CURRENT_TERM, VOTED_TERM, VOTED_FOR, STATE
 
     # If the candidate's term is greater than our current term, we update our term and reset our vote.
     if term > CURRENT_TERM:
         CURRENT_TERM = term
         VOTED_TERM = -1
         VOTED_FOR = None
+        STATE = "follower"
 
     # check if log is at least as up to date as ours
     log_ok = (candidate_log_term > my_log_term) or (
         candidate_log_term == my_log_term and candidate_log_index >= my_log_index
     )
 
-    if not log_ok:
+    if not log_ok or term < CURRENT_TERM:
         print(
             "Rejecting vote. Candidate log:", (candidate_log_term, candidate_log_index),
             "My log:", (my_log_term, my_log_index)
@@ -121,3 +67,44 @@ def reset_vote(term):
     global VOTED_FOR, VOTED_TERM
     VOTED_FOR = None
     VOTED_TERM = term
+
+def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes, quorum):
+    """
+    Called when a node's own election timer fires. Becomes a candidate,
+    votes for itself, and requests votes for itself only (not for anyone
+    else) — unlike the old elect_leader, which asked about every candidate.
+    """
+    global CURRENT_TERM, STATE, VOTED_TERM, VOTED_FOR
+
+    CURRENT_TERM += 1
+    STATE = "candidate"
+    VOTED_TERM = CURRENT_TERM
+    VOTED_FOR = my_address   # vote for self
+
+    term = CURRENT_TERM
+    votes = 1   # our own vote
+
+    for peer in get_alive_nodes():
+        if peer != my_address:
+            try:
+                with httpx.Client(timeout=2.0) as client:
+                    response = client.put(
+                        f"{peer}/vote",
+                        params={
+                            "candidate": my_address,
+                            "term": term,
+                            "log_index": my_log_index,
+                            "log_term": my_log_term
+                        }
+                    )
+                    if response.json()["vote_for"] == my_address:
+                        votes += 1
+            except:
+                pass
+
+    if STATE == "candidate" and votes >= quorum:
+        STATE = "leader"
+        return my_address
+
+    STATE = "follower"
+    return None

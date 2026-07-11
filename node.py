@@ -32,17 +32,19 @@ async def lifespan(app: FastAPI):
 
     if MY_ADDRESS == cluster.LEADER:
         cluster.reset_leader_state(MY_ADDRESS)
-
-    asyncio.create_task(asyncio.to_thread(cluster.monitor_leader, MY_ADDRESS, elect_leader))
+        
+    # This is a long-running task that will keep checking if the leader is alive and start an election if not.
+    asyncio.create_task(asyncio.to_thread(cluster.monitor_leader, MY_ADDRESS, start_election))
+    # This is a long-running task that will keep sending AppendEntries to peers if we're the leader.
     asyncio.create_task(asyncio.to_thread(cluster.replication_loop, MY_ADDRESS, current_term))
 
     yield
 
 app = FastAPI(lifespan=lifespan)
 
-# elect leader via consensus.elect_leader and return the best candidate if any, else return None
-def elect_leader():
-    return consensus.elect_leader(
+
+def start_election():
+    return consensus.start_election(
         MY_ADDRESS,
         cluster.PEERS,
         storage.last_log_index(),
@@ -55,18 +57,7 @@ def elect_leader():
 def health():
     return {"status": "ok"}
 
-@app.put("/leader")
-def set_leader(new_leader: str):
 
-    # check if the new leader is in the cluster peers
-    if new_leader not in cluster.PEERS:
-        raise HTTPException(status_code=400, detail="Unknown leader")
-    # tell followers who the new leader is, and reset our vote for this term
-    cluster.set_leader(new_leader)
-    consensus.reset_vote(consensus.CURRENT_TERM)
-    print("NEW LEADER:", cluster.LEADER)
-
-    return {"leader": cluster.LEADER}
 
 @app.put("/put/{key}")
 def put(key: str, value: str):
@@ -74,6 +65,7 @@ def put(key: str, value: str):
     if MY_ADDRESS != cluster.LEADER:
         try:
             with httpx.Client() as client:
+                # forward the request to the leader
                 response = client.put(f"{cluster.LEADER}/put/{key}", params={"value": value})
             return response.json()
         except httpx.RequestError:
@@ -104,6 +96,7 @@ def append_entries(req: AppendEntriesRequest):
         return {"success": False, "term": consensus.CURRENT_TERM}
 
     consensus.CURRENT_TERM = req.term
+    consensus.STATE = "follower"   # a valid leader exists — stop being a candidate
     cluster.set_leader(req.leader)
     cluster.note_heartbeat()
 
@@ -115,7 +108,12 @@ def append_entries(req: AppendEntriesRequest):
 
 @app.put("/vote")
 def vote(candidate: str, term: int, log_index: int, log_term: int):
-    return consensus.handle_vote_request(
+    result = consensus.handle_vote_request(
         candidate, term, log_index, log_term,
         storage.last_log_index(), storage.last_log_term()
     )
+
+    if result["vote_for"] == candidate:
+        cluster.note_heartbeat()   # granted a vote — reset our own timer
+
+    return result

@@ -148,39 +148,27 @@ def replication_loop(my_address, current_term_getter):
         time.sleep(0.5)
 
 
-def monitor_leader(my_address, elect_leader):
-    """
-    Loop forever. If we're not the leader and haven't heard from one in
-    10s, run an election. elect_leader is a zero-arg callable.
-    """
+
+def monitor_leader(my_address, start_election):
     global LEADER, LAST_HEARTBEAT
 
-    time.sleep(random.uniform(3, 6))
-    election_timeout = random.uniform(10, 20)
-    # monitoring loop: if we haven't heard from the leader in 10s, start an election
+    time.sleep(5)
+    timeout = random.uniform(10, 25)
+
     while True:
         if my_address != LEADER:
-            if time.time() - LAST_HEARTBEAT > election_timeout:
-                print("Heartbeat timeout!")
+            if time.time() - LAST_HEARTBEAT > timeout:
+                print("Election timeout! Becoming candidate.")
 
-                # best candidate from function consensus.elect_leader() is returned    
-                new_leader = elect_leader()
+                new_leader = start_election()
 
-                if new_leader:
-                    LEADER = new_leader
+                if new_leader == my_address:
+                    LEADER = my_address
+                    reset_leader_state(my_address)
 
-                    # if i am the new leader, reset next_index and match_index for all peers
-                    if new_leader == my_address:
-                        reset_leader_state(my_address)
-
-                    # tell followers who the new leader is, and reset our vote for this term
-                    with httpx.Client() as client:
-                        for peer in PEERS:
-                            try:
-                                client.put(f"{peer}/leader", params={"new_leader": new_leader})
-                            except:
-                                pass
-
-                    LAST_HEARTBEAT = time.time()
+                LAST_HEARTBEAT = time.time()   # reset regardless of outcome
+                timeout = random.uniform(10, 25)
+        else:
+            timeout = random.uniform(10, 25)
 
         time.sleep(1)

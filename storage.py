@@ -1,20 +1,32 @@
-"""
-Storage layer: in-memory key-value store + append-only log on disk.
 
-Log entries now carry a `term` (canonical Raft requirement). LOG_ENTRIES is
-the full log — committed and uncommitted tail — indexed contiguously from 1.
-Disk only ever receives entries once they're committed.
-"""
+import json
+import os
 
 LOG_FILE = "w2.log"
 store = {}
 LOG_ENTRIES = []       # [{index, term, key, value}], contiguous from index 1
 COMMIT_INDEX = 0
+SNAPSHOT_FILE = "snapshot.json"
+LAST_INCLUDED_INDEX = 0
+LAST_INCLUDED_TERM = 0
 
 # Storage API
 def recover_from_log():
-    global COMMIT_INDEX
+    global COMMIT_INDEX, LAST_INCLUDED_INDEX, LAST_INCLUDED_TERM
 
+    # Step 1: load snapshot first, if it exists
+    if os.path.exists(SNAPSHOT_FILE):
+        with open(SNAPSHOT_FILE, "r") as f:
+            snapshot_data = json.load(f)
+
+        store.update(snapshot_data["store"])
+        LAST_INCLUDED_INDEX = snapshot_data["last_included_index"]
+        LAST_INCLUDED_TERM = snapshot_data["last_included_term"]
+        COMMIT_INDEX = LAST_INCLUDED_INDEX
+
+        print("Recovered from snapshot at index", LAST_INCLUDED_INDEX)
+
+    # Step 2: replay whatever's left in the log (entries after the snapshot point)
     try:
         with open(LOG_FILE, "r") as f:
             for line in f:
@@ -22,7 +34,6 @@ def recover_from_log():
                 index, term = int(index), int(term)
 
                 store[key] = value
-                # it append everything right now
                 LOG_ENTRIES.append({
                     "index": index,
                     "term": term,
@@ -30,7 +41,8 @@ def recover_from_log():
                     "value": value
                 })
 
-        COMMIT_INDEX = LOG_ENTRIES[-1]["index"] if LOG_ENTRIES else 0
+        if LOG_ENTRIES:
+            COMMIT_INDEX = LOG_ENTRIES[-1]["index"]
 
         print("Recovered:", store)
         print("Recovered COMMIT_INDEX:", COMMIT_INDEX)
@@ -38,23 +50,26 @@ def recover_from_log():
     except FileNotFoundError:
         print("No log found, starting empty")
 
-
 def last_log_index():
-    return LOG_ENTRIES[-1]["index"] if LOG_ENTRIES else 0
+    if LOG_ENTRIES:
+        return LOG_ENTRIES[-1]["index"]
+    return LAST_INCLUDED_INDEX
 
 def last_log_term():
-    return LOG_ENTRIES[-1]["term"] if LOG_ENTRIES else 0
+    if LOG_ENTRIES:
+        return LOG_ENTRIES[-1]["term"]
+    return LAST_INCLUDED_TERM
 
 def term_at(index):
     if index == 0:
         return 0
+    if index == LAST_INCLUDED_INDEX:
+        return LAST_INCLUDED_TERM
     entry = get_entry(index)
     return entry["term"] if entry else 0
 
-
 def get_entry(index):
-    """O(1) lookup assuming LOG_ENTRIES stays contiguous from index 1."""
-    pos = index - 1
+    pos = index - 1 - LAST_INCLUDED_INDEX
     if 0 <= pos < len(LOG_ENTRIES) and LOG_ENTRIES[pos]["index"] == index:
         return LOG_ENTRIES[pos]
     return None
@@ -69,7 +84,6 @@ def append_entry(term, key, value):
     }
     LOG_ENTRIES.append(entry)
     return entry
-
 
 def append_entries_from_leader(prev_log_index, prev_log_term, entries, leader_commit):
     """
@@ -98,7 +112,6 @@ def append_entries_from_leader(prev_log_index, prev_log_term, entries, leader_co
 
     return True
 
-
 def apply_committed(index):
     """Advance COMMIT_INDEX up to `index`, applying entries to store + disk."""
     global COMMIT_INDEX
@@ -115,3 +128,35 @@ def apply_committed(index):
 
         COMMIT_INDEX = i
         print("COMMITTED:", i)
+        if COMMIT_INDEX % 5 == 0:
+            take_snapshot()        
+
+def take_snapshot():
+    """Serialize current store + COMMIT_INDEX to disk, then truncate the log
+    up to COMMIT_INDEX. Manual trigger for now — no automatic threshold yet."""
+    global LOG_ENTRIES, LAST_INCLUDED_INDEX, LAST_INCLUDED_TERM
+
+    snapshot_data = {
+        "store": store,
+        "last_included_index": COMMIT_INDEX,
+        "last_included_term": term_at(COMMIT_INDEX)
+    }
+
+    # Write safely: temp file first, then atomic rename
+    tmp_file = SNAPSHOT_FILE + ".tmp"
+    with open(tmp_file, "w") as f:
+        json.dump(snapshot_data, f)
+    os.replace(tmp_file, SNAPSHOT_FILE)
+
+    LAST_INCLUDED_INDEX = COMMIT_INDEX
+    LAST_INCLUDED_TERM = term_at(COMMIT_INDEX)
+
+    # Truncate in-memory log: keep only entries after the snapshot point
+    LOG_ENTRIES[:] = [e for e in LOG_ENTRIES if e["index"] > LAST_INCLUDED_INDEX]
+
+    # Rewrite the on-disk log to match
+    with open(LOG_FILE, "w") as f:
+        for entry in LOG_ENTRIES:
+            f.write(f"{entry['index']}, {entry['term']}, {entry['key']}, {entry['value']}\n")
+
+    print("SNAPSHOT TAKEN at index", LAST_INCLUDED_INDEX)

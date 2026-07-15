@@ -73,7 +73,7 @@ def put(key: str, value: str):
 
     entry = storage.append_entry(current_term(), key, value)
     print("APPENDED LOCALLY:", entry)
-
+    
     # The replication_loop pushes this out and advances COMMIT_INDEX on its
     # own tick; we just wait here for it to catch up to our entry.
     deadline = time.time() + 5.0
@@ -117,3 +117,9 @@ def vote(candidate: str, term: int, log_index: int, log_term: int):
         cluster.note_heartbeat()   # granted a vote — reset our own timer
 
     return result
+
+
+@app.post("/debug/snapshot")
+def debug_snapshot():
+    storage.take_snapshot()
+    return {"snapshotted_at": storage.LAST_INCLUDED_INDEX}

@@ -1,14 +1,3 @@
-"""
-Cluster layer: peer list, leader tracking, and the leader-driven
-replication loop (canonical Raft AppendEntries push, doubles as heartbeat).
-
-Owns: PEERS, LEADER, next_index, match_index, monitor_leader,
-replication_loop.
-
-catch_up_logs / send_heartbeats / LEADER_LOG_INDEX are gone — replication
-is now leader-push, not follower-pull, so there is nothing left for a
-follower to "catch up" on its own.
-"""
 
 import time
 import httpx

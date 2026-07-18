@@ -118,8 +118,7 @@ def vote(candidate: str, term: int, log_index: int, log_term: int):
 
     return result
 
+@app.get("/store")
+def get_store():
+    return storage.store
 
-@app.post("/debug/snapshot")
-def debug_snapshot():
-    storage.take_snapshot()
-    return {"snapshotted_at": storage.LAST_INCLUDED_INDEX}

@@ -161,3 +161,4 @@ def monitor_leader(my_address, start_election):
             timeout = random.uniform(10, 25)
 
         time.sleep(1)
+

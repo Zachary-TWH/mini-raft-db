@@ -132,8 +132,9 @@ def apply_committed(index):
             take_snapshot()        
 
 def take_snapshot():
-    """Serialize current store + COMMIT_INDEX to disk, then truncate the log
-    up to COMMIT_INDEX. Manual trigger for now — no automatic threshold yet."""
+
+    #Serialize current store + COMMIT_INDEX to disk, then truncate the log
+    #up to COMMIT_INDEX. Auto-triggered from apply_committed every 5 commits.#"""
     global LOG_ENTRIES, LAST_INCLUDED_INDEX, LAST_INCLUDED_TERM
 
     snapshot_data = {

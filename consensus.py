@@ -17,10 +17,6 @@ VOTED_FOR = None
 STATE = "follower"   # "follower" | "candidate" | "leader"
 
 
-def start_new_term():
-    global CURRENT_TERM
-    CURRENT_TERM += 1
-    return CURRENT_TERM
 
 # Handle incoming vote requests from other nodes and determine whether to grant the vote based on the Raft voting rules.
 def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term, my_log_index, my_log_term):
@@ -60,13 +56,6 @@ def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term
     )
 
     return {"term": CURRENT_TERM, "vote_for": VOTED_FOR}
-
-
-def reset_vote(term):
-    """Used by /leader when a new leader is set externally (not via election)."""
-    global VOTED_FOR, VOTED_TERM
-    VOTED_FOR = None
-    VOTED_TERM = term
 
 def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes, quorum):
     """

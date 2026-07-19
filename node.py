@@ -50,7 +50,8 @@ def start_election():
         storage.last_log_index(),
         storage.last_log_term(),
         lambda: cluster.get_alive_nodes(MY_ADDRESS),
-        cluster.quorum_size()
+        cluster.quorum_size(),
+        request_pre_vote
     )
 
 @app.get("/health")
@@ -92,9 +93,10 @@ def get(key: str):
 
 @app.put("/internal/append_entries")
 def append_entries(req: AppendEntriesRequest):
+    # leader's term must be at least as large as our own, or we reject the request
     if req.term < consensus.CURRENT_TERM:
         return {"success": False, "term": consensus.CURRENT_TERM}
-
+    # reassign our term and state to follower if the leader's term is greater than ours
     consensus.CURRENT_TERM = req.term
     consensus.STATE = "follower"   # a valid leader exists — stop being a candidate
     cluster.set_leader(req.leader)
@@ -122,3 +124,39 @@ def vote(candidate: str, term: int, log_index: int, log_term: int):
 def get_store():
     return storage.store
 
+@app.put("/pre_vote")
+def pre_vote(candidate: str, term: int, log_index: int, log_term: int):
+    return consensus.handle_pre_vote_request(
+        candidate, term, log_index, log_term,
+        storage.last_log_index(), storage.last_log_term()
+    )
+
+
+def request_pre_vote(peer, term, my_log_index, my_log_term):
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            response = client.put(
+                f"{peer}/pre_vote",
+                params={
+                    "candidate": MY_ADDRESS,
+                    "term": term,
+                    "log_index": my_log_index,
+                    "log_term": my_log_term
+                }
+            )
+            return response.json().get("vote_granted", False)
+    except:
+        return False
+    
+
+
+@app.get("/debug/status")
+def debug_status():
+    return {
+        "leader": cluster.LEADER,
+        "current_term": consensus.CURRENT_TERM,
+        "state": consensus.STATE,
+        "commit_index": storage.COMMIT_INDEX,
+        "last_log_index": storage.last_log_index(),
+        "last_heartbeat_seconds_ago": time.time() - cluster.LAST_HEARTBEAT
+    }

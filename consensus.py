@@ -18,6 +18,20 @@ STATE = "follower"   # "follower" | "candidate" | "leader"
 
 
 
+def handle_pre_vote_request(candidate, term, candidate_log_index, candidate_log_term, my_log_index, my_log_term):
+    """
+    Answer 'would you vote for me if I asked for real' — WITHOUT touching
+    CURRENT_TERM, VOTED_TERM, or VOTED_FOR. Pure hypothetical check.
+    """
+    log_ok = (candidate_log_term > my_log_term) or (
+        candidate_log_term == my_log_term and candidate_log_index >= my_log_index
+    )
+
+    term_ok = term > CURRENT_TERM
+
+    return {"vote_granted": log_ok and term_ok}
+
+
 # Handle incoming vote requests from other nodes and determine whether to grant the vote based on the Raft voting rules.
 def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term, my_log_index, my_log_term):
     """
@@ -57,7 +71,21 @@ def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term
 
     return {"term": CURRENT_TERM, "vote_for": VOTED_FOR}
 
-def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes, quorum):
+def handle_pre_vote_request(candidate, term, candidate_log_index, candidate_log_term, my_log_index, my_log_term):
+    """
+    Answer 'would you vote for me if I asked for real' — WITHOUT touching
+    CURRENT_TERM, VOTED_TERM, or VOTED_FOR. Pure hypothetical check.
+    """
+    log_ok = (candidate_log_term > my_log_term) or (
+        candidate_log_term == my_log_term and candidate_log_index >= my_log_index
+    )
+
+    term_ok = term > CURRENT_TERM
+
+    return {"vote_granted": log_ok and term_ok}
+
+def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes, quorum, request_pre_vote):
+    
     """
     Called when a node's own election timer fires. Becomes a candidate,
     votes for itself, and requests votes for itself only (not for anyone
@@ -65,6 +93,19 @@ def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes
     """
     global CURRENT_TERM, STATE, VOTED_TERM, VOTED_FOR
 
+    hypothetical_term = CURRENT_TERM + 1
+    pre_votes = 1  # ourselves
+
+    for peer in get_alive_nodes():
+        if peer != my_address:
+            if request_pre_vote(peer, hypothetical_term, my_log_index, my_log_term):
+                pre_votes += 1
+
+    if pre_votes < quorum:
+        # Wouldn't win even hypothetically — don't touch real term at all.
+        return None
+    
+    # Pre-vote passed — proceed to the real election.
     CURRENT_TERM += 1
     STATE = "candidate"
     VOTED_TERM = CURRENT_TERM

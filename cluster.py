@@ -18,16 +18,13 @@ LAST_HEARTBEAT = time.time()
 next_index = {}   # peer -> next log index the leader will send that peer
 match_index = {}  # peer -> highest log index known replicated on that peer
 
-
 def set_leader(new_leader):
     global LEADER
     LEADER = new_leader
 
-
 def quorum_size():
     """Majority needed out of the full configured cluster (not just alive nodes)."""
     return (len(PEERS) // 2) + 1
-
 
 def reset_leader_state(my_address):
     """Called whenever we become leader. next_index/match_index only make
@@ -55,7 +52,6 @@ def get_alive_nodes(my_address):
             pass
 
     return alive
-
 
 def replicate_to_peer(client, my_address, peer, current_term):
     """
@@ -97,7 +93,6 @@ def replicate_to_peer(client, my_address, peer, current_term):
     except:
         return False
 
-
 def advance_commit_index(my_address, current_term):
     """
     Raft commit rule: an entry is committed once a majority of nodes have
@@ -118,7 +113,6 @@ def advance_commit_index(my_address, current_term):
             storage.apply_committed(n)
             break
 
-
 def replication_loop(my_address, current_term_getter):
     """
     Runs forever. While we're leader, push AppendEntries to every peer on
@@ -135,8 +129,6 @@ def replication_loop(my_address, current_term_getter):
             advance_commit_index(my_address, current_term_getter())
 
         time.sleep(0.5)
-
-
 
 def monitor_leader(my_address, start_election):
     global LEADER, LAST_HEARTBEAT
@@ -162,3 +154,19 @@ def monitor_leader(my_address, start_election):
 
         time.sleep(1)
 
+def confirm_leadership(my_address, current_term):
+    """
+    Ping a majority of peers right now to confirm we're still actually
+    leader. Returns True only if a majority responded successfully.
+    Used to make reads safe — a partitioned leader will fail this check
+    instead of serving stale data.
+    """
+    confirmed = 1  # ourselves
+
+    with httpx.Client() as client:
+        for peer in PEERS:
+            if peer != my_address:
+                if replicate_to_peer(client, my_address, peer, current_term):
+                    confirmed += 1
+
+    return confirmed >= quorum_size()

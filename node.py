@@ -58,8 +58,6 @@ def start_election():
 def health():
     return {"status": "ok"}
 
-
-
 @app.put("/put/{key}")
 def put(key: str, value: str):
 
@@ -85,11 +83,6 @@ def put(key: str, value: str):
 
     raise HTTPException(status_code=503, detail="Commit timed out")
 
-@app.get("/get/{key}")
-def get(key: str):
-    if key not in storage.store:
-        raise HTTPException(status_code=404, detail="Key not found")
-    return storage.store[key]
 
 @app.put("/internal/append_entries")
 def append_entries(req: AppendEntriesRequest):
@@ -149,7 +142,6 @@ def request_pre_vote(peer, term, my_log_index, my_log_term):
         return False
     
 
-
 @app.get("/debug/status")
 def debug_status():
     return {
@@ -160,3 +152,23 @@ def debug_status():
         "last_log_index": storage.last_log_index(),
         "last_heartbeat_seconds_ago": time.time() - cluster.LAST_HEARTBEAT
     }
+
+@app.get("/get/{key}")
+def get(key: str):
+    if MY_ADDRESS != cluster.LEADER:
+        raise HTTPException(status_code=503, detail="Not the leader — retry against the current leader")
+
+    read_index = storage.COMMIT_INDEX
+
+    if not cluster.confirm_leadership(MY_ADDRESS, current_term()):
+        raise HTTPException(status_code=503, detail="Could not confirm leadership — try again")
+
+    # Rare edge case: make sure our own commit has caught up to the point
+    # we recorded before confirming leadership.
+    deadline = time.time() + 2.0
+    while storage.COMMIT_INDEX < read_index and time.time() < deadline:
+        time.sleep(0.01)
+
+    if key not in storage.store:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return storage.store[key]

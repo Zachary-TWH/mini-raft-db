@@ -1,1 +1,6 @@
 linux.txt
+w2.log
+snapshot.json
+snapshot.json.tmp
+__pycache__/
+*.pyc

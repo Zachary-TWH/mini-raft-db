@@ -3,6 +3,8 @@ import time
 import httpx
 import storage
 import random
+import json
+import threading
 
 PEERS = [
     "http://node1:8000",
@@ -61,6 +63,10 @@ def replicate_to_peer(client, my_address, peer, current_term):
     """
 
     ni = next_index.get(peer, storage.last_log_index() + 1)
+
+    if ni <= storage.LAST_INCLUDED_INDEX:
+        return send_install_snapshot(client, my_address, peer, current_term)
+
     prev_index = ni - 1
     prev_term = storage.term_at(prev_index)
     #return entries that are at or after next_index[peer]
@@ -113,7 +119,10 @@ def advance_commit_index(my_address, current_term):
             storage.apply_committed(n)
             break
 
+
+
 def replication_loop(my_address, current_term_getter):
+
     """
     Runs forever. While we're leader, push AppendEntries to every peer on
     a fixed tick — this is both replication and the heartbeat (an empty
@@ -124,10 +133,12 @@ def replication_loop(my_address, current_term_getter):
             with httpx.Client() as client:
                 for peer in PEERS:
                     if peer != my_address:
-                        replicate_to_peer(client, my_address, peer, current_term_getter())
+                        threading.Thread(
+                            target=replicate_to_peer,
+                            args=(client, my_address, peer, current_term_getter())
+                        ).start()
 
             advance_commit_index(my_address, current_term_getter())
-
         time.sleep(0.5)
 
 def monitor_leader(my_address, start_election):
@@ -170,3 +181,32 @@ def confirm_leadership(my_address, current_term):
                     confirmed += 1
 
     return confirmed >= quorum_size()
+
+
+def send_install_snapshot(client, my_address, peer, current_term):
+    try:
+        with open(storage.SNAPSHOT_FILE, "r") as f:
+            snapshot_data = json.load(f)
+
+        response = client.put(
+            f"{peer}/internal/install_snapshot",
+            json={
+                "term": current_term,
+                "leader": my_address,
+                "last_included_index": snapshot_data["last_included_index"],
+                "last_included_term": snapshot_data["last_included_term"],
+                "store": snapshot_data["store"]
+            },
+            timeout=5.0
+        )
+        result = response.json()
+
+        if result.get("success"):
+            match_index[peer] = snapshot_data["last_included_index"]
+            next_index[peer] = match_index[peer] + 1
+            return True
+
+        return False
+
+    except:
+        return False

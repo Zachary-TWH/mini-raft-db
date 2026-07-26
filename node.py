@@ -10,12 +10,11 @@ from typing import List, Dict
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-MY_ADDRESS = os.getenv("MY_ADDRESS")
 
+MY_ADDRESS = os.getenv("MY_ADDRESS")
 
 def current_term():
     return consensus.CURRENT_TERM
-
 
 class AppendEntriesRequest(BaseModel):
     term: int
@@ -24,6 +23,13 @@ class AppendEntriesRequest(BaseModel):
     prev_log_term: int
     entries: List[Dict]
     leader_commit: int
+
+class InstallSnapshotRequest(BaseModel):
+    term: int
+    leader: str
+    last_included_index: int
+    last_included_term: int
+    store: Dict
 
 
 @asynccontextmanager
@@ -41,7 +47,6 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(lifespan=lifespan)
-
 
 def start_election():
     return consensus.start_election(
@@ -83,7 +88,6 @@ def put(key: str, value: str):
 
     raise HTTPException(status_code=503, detail="Commit timed out")
 
-
 @app.put("/internal/append_entries")
 def append_entries(req: AppendEntriesRequest):
     # leader's term must be at least as large as our own, or we reject the request
@@ -124,7 +128,6 @@ def pre_vote(candidate: str, term: int, log_index: int, log_term: int):
         storage.last_log_index(), storage.last_log_term()
     )
 
-
 def request_pre_vote(peer, term, my_log_index, my_log_term):
     try:
         with httpx.Client(timeout=2.0) as client:
@@ -141,7 +144,6 @@ def request_pre_vote(peer, term, my_log_index, my_log_term):
     except:
         return False
     
-
 @app.get("/debug/status")
 def debug_status():
     return {
@@ -150,6 +152,9 @@ def debug_status():
         "state": consensus.STATE,
         "commit_index": storage.COMMIT_INDEX,
         "last_log_index": storage.last_log_index(),
+        "last_included_index": storage.LAST_INCLUDED_INDEX,
+        "next_index": cluster.next_index,
+        "match_index": cluster.match_index,
         "last_heartbeat_seconds_ago": time.time() - cluster.LAST_HEARTBEAT
     }
 
@@ -172,3 +177,21 @@ def get(key: str):
     if key not in storage.store:
         raise HTTPException(status_code=404, detail="Key not found")
     return storage.store[key]
+
+@app.put("/internal/install_snapshot")
+def install_snapshot(req: InstallSnapshotRequest):
+    if req.term < consensus.CURRENT_TERM:
+        return {"success": False, "term": consensus.CURRENT_TERM}
+
+    consensus.CURRENT_TERM = req.term
+    consensus.STATE = "follower"
+    cluster.set_leader(req.leader)
+    cluster.note_heartbeat()
+
+    storage.install_snapshot(
+        req.last_included_index,
+        req.last_included_term,
+        req.store
+    )
+
+    return {"success": True, "term": consensus.CURRENT_TERM}

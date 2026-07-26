@@ -71,18 +71,7 @@ def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term
 
     return {"term": CURRENT_TERM, "vote_for": VOTED_FOR}
 
-def handle_pre_vote_request(candidate, term, candidate_log_index, candidate_log_term, my_log_index, my_log_term):
-    """
-    Answer 'would you vote for me if I asked for real' — WITHOUT touching
-    CURRENT_TERM, VOTED_TERM, or VOTED_FOR. Pure hypothetical check.
-    """
-    log_ok = (candidate_log_term > my_log_term) or (
-        candidate_log_term == my_log_term and candidate_log_index >= my_log_index
-    )
 
-    term_ok = term > CURRENT_TERM
-
-    return {"vote_granted": log_ok and term_ok}
 
 def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes, quorum, request_pre_vote):
     

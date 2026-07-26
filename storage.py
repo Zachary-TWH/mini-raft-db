@@ -161,3 +161,41 @@ def take_snapshot():
             f.write(f"{entry['index']}, {entry['term']}, {entry['key']}, {entry['value']}\n")
 
     print("SNAPSHOT TAKEN at index", LAST_INCLUDED_INDEX)
+
+
+
+def install_snapshot(last_included_index, last_included_term, incoming_store):
+    """
+    Follower-side: overwrite our own state with a snapshot the leader sent,
+    because we've fallen too far behind for normal AppendEntries to help
+    (the entries we need were already truncated on the leader's side).
+    """
+    global LOG_ENTRIES, COMMIT_INDEX, LAST_INCLUDED_INDEX, LAST_INCLUDED_TERM
+
+    if last_included_index <= LAST_INCLUDED_INDEX:
+        # We already have this snapshot (or a newer one) — nothing to do.
+        return
+
+    store.clear()
+    store.update(incoming_store)
+
+    LOG_ENTRIES[:] = [e for e in LOG_ENTRIES if e["index"] > last_included_index]
+
+    LAST_INCLUDED_INDEX = last_included_index
+    LAST_INCLUDED_TERM = last_included_term
+    COMMIT_INDEX = max(COMMIT_INDEX, last_included_index)
+
+    tmp_file = SNAPSHOT_FILE + ".tmp"
+    with open(tmp_file, "w") as f:
+        json.dump({
+            "store": store,
+            "last_included_index": last_included_index,
+            "last_included_term": last_included_term
+        }, f)
+    os.replace(tmp_file, SNAPSHOT_FILE)
+
+    with open(LOG_FILE, "w") as f:
+        for entry in LOG_ENTRIES:
+            f.write(f"{entry['index']}, {entry['term']}, {entry['key']}, {entry['value']}\n")
+
+    print("INSTALLED SNAPSHOT at index", last_included_index)

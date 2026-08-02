@@ -208,3 +208,22 @@ def add_node(address: str):
     if success:
         return {"status": "added", "new_config": cluster.OLD_CONFIG}
     raise HTTPException(status_code=503, detail="Config change did not commit in time")
+
+@app.put("/remove_node")
+def remove_node(address: str):
+
+    if address == MY_ADDRESS:
+            raise HTTPException(status_code=400, detail="Leader cannot remove itself (not supported)")
+    
+    if MY_ADDRESS != cluster.LEADER:
+        raise HTTPException(status_code=503, detail="Not the leader — retry against the current leader")
+
+    if address not in cluster.OLD_CONFIG:
+        raise HTTPException(status_code=400, detail="Address not in current config")
+
+    new_members = [p for p in cluster.OLD_CONFIG if p != address]
+    success = cluster.start_config_change(MY_ADDRESS, current_term(), new_members)
+
+    if success:
+        return {"status": "removed", "new_config": cluster.OLD_CONFIG}
+    raise HTTPException(status_code=503, detail="Config change did not commit in time")

@@ -32,6 +32,9 @@ def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term
     """
     global CURRENT_TERM, VOTED_TERM, VOTED_FOR, STATE
 
+    if candidate not in cluster.all_known_peers():
+        return {"term": CURRENT_TERM, "vote_for": None}
+    
     # If the candidate's term is greater than our current term, we update our term and reset our vote.
     if term > CURRENT_TERM:
         CURRENT_TERM = term

@@ -13,7 +13,8 @@ PEERS = [
     "http://node4:8000",
     "http://node5:8000"
 ]
-
+OLD_CONFIG = list(PEERS)   # starts as your current 5-node list
+NEW_CONFIG = None          # None = no config change in progress
 LEADER = "http://node1:8000"
 LAST_HEARTBEAT = time.time()
 
@@ -32,7 +33,7 @@ def reset_leader_state(my_address):
     """Called whenever we become leader. next_index/match_index only make
     sense for whoever currently holds leadership, so they get reset fresh."""
     last_index = storage.last_log_index()
-    for peer in PEERS:
+    for peer in all_known_peers():
         if peer != my_address:
             next_index[peer] = last_index + 1
             match_index[peer] = 0
@@ -62,7 +63,7 @@ def replicate_to_peer(client, my_address, peer, current_term):
     next_index by one and let the next tick retry further back.
     """
 
-    ni = next_index.get(peer, storage.last_log_index() + 1)
+    ni = next_index.get(peer, storage.last_log_index() + 1) 
 
     if ni <= storage.LAST_INCLUDED_INDEX:
         return send_install_snapshot(client, my_address, peer, current_term)
@@ -110,34 +111,33 @@ def advance_commit_index(my_address, current_term):
         if storage.term_at(n) != current_term:
             continue
 
-        matched = 1  # ourselves
-        for peer in PEERS:
+        matched_nodes = {my_address}
+        for peer in all_known_peers():
             if peer != my_address and match_index.get(peer, 0) >= n:
-                matched += 1
+                matched_nodes.add(peer)
 
-        if matched >= quorum_size():
+        if quorum_met(matched_nodes):
             storage.apply_committed(n)
             break
 
-
-
 def replication_loop(my_address, current_term_getter):
-
-    """
-    Runs forever. While we're leader, push AppendEntries to every peer on
-    a fixed tick — this is both replication and the heartbeat (an empty
-    entries list is just a heartbeat). This replaces send_heartbeats.
-    """
     while True:
         if my_address == LEADER:
-            with httpx.Client() as client:
-                for peer in PEERS:
-                    if peer != my_address:
-                        threading.Thread(
-                            target=replicate_to_peer,
-                            args=(client, my_address, peer, current_term_getter())
-                        ).start()
+            client = httpx.Client()
+            threads = []
+            for peer in all_known_peers():
+                if peer != my_address:
+                    t = threading.Thread(
+                        target=replicate_to_peer,
+                        args=(client, my_address, peer, current_term_getter())
+                    )
+                    t.start()
+                    threads.append(t)
 
+            for t in threads:
+                t.join(timeout=2.0)
+
+            client.close()
             advance_commit_index(my_address, current_term_getter())
         time.sleep(0.5)
 
@@ -166,22 +166,26 @@ def monitor_leader(my_address, start_election):
         time.sleep(1)
 
 def confirm_leadership(my_address, current_term):
-    """
-    Ping a majority of peers right now to confirm we're still actually
-    leader. Returns True only if a majority responded successfully.
-    Used to make reads safe — a partitioned leader will fail this check
-    instead of serving stale data.
-    """
-    confirmed = 1  # ourselves
+    results = {}
 
-    with httpx.Client() as client:
-        for peer in PEERS:
-            if peer != my_address:
-                if replicate_to_peer(client, my_address, peer, current_term):
-                    confirmed += 1
+    def check_peer(peer):
+        with httpx.Client() as client:
+            results[peer] = replicate_to_peer(client, my_address, peer, current_term)
 
-    return confirmed >= quorum_size()
+    threads = []
+    for peer in all_known_peers():
+        if peer != my_address:
+            t = threading.Thread(target=check_peer, args=(peer,))
+            t.start()
+            threads.append(t)
 
+    for t in threads:
+        t.join(timeout=3.0)
+
+    confirmed_nodes = {my_address}
+    confirmed_nodes.update(peer for peer, ok in results.items() if ok)
+
+    return quorum_met(confirmed_nodes)
 
 def send_install_snapshot(client, my_address, peer, current_term):
     try:
@@ -210,3 +214,74 @@ def send_install_snapshot(client, my_address, peer, current_term):
 
     except:
         return False
+
+def get_current_configs():
+    """Returns the list(s) of configs currently in effect."""
+    if NEW_CONFIG is None:
+        return [OLD_CONFIG]
+    return [OLD_CONFIG, NEW_CONFIG]
+
+def majority_reached(voters_or_matchers, config):
+    """Given a set of nodes that said yes/matched, check if that's a
+    majority of this specific config."""
+    count = sum(1 for node in config if node in voters_or_matchers)
+    needed = (len(config) // 2) + 1
+    return count >= needed
+
+def quorum_met(voters_or_matchers):
+    """
+    Joint-aware quorum check. voters_or_matchers is a set of node
+    addresses that said yes / are caught up. Returns True only if
+    majority is reached in EVERY currently-active config (just one
+    config normally, two during a joint phase).
+    """
+    for config in get_current_configs():
+        if not majority_reached(voters_or_matchers, config):
+            return False
+    return True
+
+def start_config_change(my_address, current_term, new_members):
+    """
+    Leader-only. Kicks off adding/removing nodes: appends the joint-phase
+    entry (old+new both active), waits for it to commit, then appends the
+    follow-up entry that finalizes new_members as the only config.
+    """
+    global OLD_CONFIG, NEW_CONFIG
+
+    entry = storage.append_config_entry(current_term, list(OLD_CONFIG), list(new_members))
+    print("JOINT PHASE STARTED:", entry)
+
+    for member in new_members:
+        if member not in next_index:
+            next_index[member] = 1
+            match_index[member] = 0
+
+    joint_index = entry["index"]
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if storage.COMMIT_INDEX >= joint_index:
+            break
+        time.sleep(0.05)
+    else:
+        return False  # joint phase never committed — bail, don't finalize
+
+    final_entry = storage.append_config_entry(current_term, list(new_members), None)
+    print("FINALIZING CONFIG:", final_entry)
+
+    final_index = final_entry["index"]
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if storage.COMMIT_INDEX >= final_index:
+            return True
+        time.sleep(0.05)
+
+    return False
+
+
+def all_known_peers():
+    """Union of OLD_CONFIG and NEW_CONFIG (if joint phase active).
+    This is 'everyone we might need to talk to right now.'"""
+    peers = set(OLD_CONFIG)
+    if NEW_CONFIG is not None:
+        peers.update(NEW_CONFIG)
+    return peers

@@ -34,3 +34,10 @@ services:
       - "8005:8000"
     environment:
       - MY_ADDRESS=http://node5:8000
+  node6:
+    build: .
+    image: my-kv-store:latest
+    ports:
+      - "8006:8000"
+    environment:
+      - MY_ADDRESS=http://node6:8000

@@ -1,15 +1,6 @@
-"""
-Consensus layer: Raft term/vote bookkeeping and leader election.
-
-Owns: CURRENT_TERM, VOTED_TERM, VOTED_FOR, elect_leader, request_votes,
-and the decision logic behind the /vote route.
-
-Vote comparisons now use (log_term, log_index) instead of log_index alone —
-index-only comparison isn't safe once entries carry terms (a follower can
-have a longer log with an older, wrong term after a crash/partition).
-"""
 
 import httpx
+import cluster
 
 CURRENT_TERM = 0
 VOTED_TERM = -1
@@ -72,9 +63,7 @@ def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term
     return {"term": CURRENT_TERM, "vote_for": VOTED_FOR}
 
 
-
-def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes, quorum, request_pre_vote):
-    
+def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes, request_pre_vote):
     """
     Called when a node's own election timer fires. Becomes a candidate,
     votes for itself, and requests votes for itself only (not for anyone
@@ -83,17 +72,17 @@ def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes
     global CURRENT_TERM, STATE, VOTED_TERM, VOTED_FOR
 
     hypothetical_term = CURRENT_TERM + 1
-    pre_votes = 1  # ourselves
+    pre_voter_set = {my_address}
 
     for peer in get_alive_nodes():
         if peer != my_address:
             if request_pre_vote(peer, hypothetical_term, my_log_index, my_log_term):
-                pre_votes += 1
+                pre_voter_set.add(peer)
 
-    if pre_votes < quorum:
+    if not cluster.quorum_met(pre_voter_set):
         # Wouldn't win even hypothetically — don't touch real term at all.
         return None
-    
+
     # Pre-vote passed — proceed to the real election.
     CURRENT_TERM += 1
     STATE = "candidate"
@@ -101,7 +90,7 @@ def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes
     VOTED_FOR = my_address   # vote for self
 
     term = CURRENT_TERM
-    votes = 1   # our own vote
+    voter_set = {my_address}
 
     for peer in get_alive_nodes():
         if peer != my_address:
@@ -117,11 +106,11 @@ def start_election(my_address, peers, my_log_index, my_log_term, get_alive_nodes
                         }
                     )
                     if response.json()["vote_for"] == my_address:
-                        votes += 1
+                        voter_set.add(peer)
             except:
                 pass
 
-    if STATE == "candidate" and votes >= quorum:
+    if STATE == "candidate" and cluster.quorum_met(voter_set):
         STATE = "leader"
         return my_address
 

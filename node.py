@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI):
         
     # This is a long-running task that will keep checking if the leader is alive and start an election if not.
     asyncio.create_task(asyncio.to_thread(cluster.monitor_leader, MY_ADDRESS, start_election))
+
     # This is a long-running task that will keep sending AppendEntries to peers if we're the leader.
     asyncio.create_task(asyncio.to_thread(cluster.replication_loop, MY_ADDRESS, current_term))
 
@@ -55,7 +56,6 @@ def start_election():
         storage.last_log_index(),
         storage.last_log_term(),
         lambda: cluster.get_alive_nodes(MY_ADDRESS),
-        cluster.quorum_size(),
         request_pre_vote
     )
 
@@ -195,3 +195,16 @@ def install_snapshot(req: InstallSnapshotRequest):
     )
 
     return {"success": True, "term": consensus.CURRENT_TERM}
+
+@app.put("/add_node")
+def add_node(address: str):
+    # Only the leader can add a new node to the cluster. If this node is not the leader, it will return a 503 error.
+    if MY_ADDRESS != cluster.LEADER:
+        raise HTTPException(status_code=503, detail="Not the leader — retry against the current leader")
+
+    new_members = list(cluster.OLD_CONFIG) + [address]
+    success = cluster.start_config_change(MY_ADDRESS, current_term(), new_members)
+
+    if success:
+        return {"status": "added", "new_config": cluster.OLD_CONFIG}
+    raise HTTPException(status_code=503, detail="Config change did not commit in time")

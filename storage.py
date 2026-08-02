@@ -29,17 +29,21 @@ def recover_from_log():
     # Step 2: replay whatever's left in the log (entries after the snapshot point)
     try:
         with open(LOG_FILE, "r") as f:
-            for line in f:
-                index, term, key, value = line.strip().split(", ")
-                index, term = int(index), int(term)
 
-                store[key] = value
-                LOG_ENTRIES.append({
-                    "index": index,
-                    "term": term,
-                    "key": key,
-                    "value": value
-                })
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+
+                if entry["type"] == "data":
+                    store[entry["key"]] = entry["value"]
+                elif entry["type"] == "config":
+                    import cluster
+                    cluster.OLD_CONFIG = entry["old_config"]
+                    cluster.NEW_CONFIG = entry["new_config"]
+
+                LOG_ENTRIES.append(entry)
 
         if LOG_ENTRIES:
             COMMIT_INDEX = LOG_ENTRIES[-1]["index"]
@@ -76,11 +80,26 @@ def get_entry(index):
 
 def append_entry(term, key, value):
     """Leader-only: append a new uncommitted entry, return it."""
+
     entry = {
         "index": last_log_index() + 1,
         "term": term,
+        "type": "data",
         "key": key,
         "value": value
+    }
+
+    LOG_ENTRIES.append(entry)
+    return entry
+
+def append_config_entry(term, old_config, new_config):
+    """Leader-only: append a new uncommitted config-change entry, return it."""
+    entry = {
+        "index": last_log_index() + 1,
+        "term": term,
+        "type": "config",
+        "old_config": old_config,
+        "new_config": new_config
     }
     LOG_ENTRIES.append(entry)
     return entry
@@ -121,15 +140,21 @@ def apply_committed(index):
         if entry is None:
             break
 
-        store[entry["key"]] = entry["value"]
+        if entry["type"] == "data":
+            store[entry["key"]] = entry["value"]
+        elif entry["type"] == "config":
+            import cluster
+            cluster.OLD_CONFIG = entry["old_config"]
+            cluster.NEW_CONFIG = entry["new_config"]
+            print("CONFIG APPLIED:", entry["old_config"], "->", entry["new_config"])
 
         with open(LOG_FILE, "a") as f:
-            f.write(f"{entry['index']}, {entry['term']}, {entry['key']}, {entry['value']}\n")
+            f.write(json.dumps(entry) + "\n")
 
         COMMIT_INDEX = i
         print("COMMITTED:", i)
         if COMMIT_INDEX % 5 == 0:
-            take_snapshot()        
+            take_snapshot()    
 
 def take_snapshot():
 
@@ -155,10 +180,10 @@ def take_snapshot():
     # Truncate in-memory log: keep only entries after the snapshot point
     LOG_ENTRIES[:] = [e for e in LOG_ENTRIES if e["index"] > LAST_INCLUDED_INDEX]
 
-    # Rewrite the on-disk log to match
+    
     with open(LOG_FILE, "w") as f:
         for entry in LOG_ENTRIES:
-            f.write(f"{entry['index']}, {entry['term']}, {entry['key']}, {entry['value']}\n")
+            f.write(json.dumps(entry) + "\n")
 
     print("SNAPSHOT TAKEN at index", LAST_INCLUDED_INDEX)
 
@@ -196,6 +221,6 @@ def install_snapshot(last_included_index, last_included_term, incoming_store):
 
     with open(LOG_FILE, "w") as f:
         for entry in LOG_ENTRIES:
-            f.write(f"{entry['index']}, {entry['term']}, {entry['key']}, {entry['value']}\n")
+            f.write(json.dumps(entry) + "\n")
 
     print("INSTALLED SNAPSHOT at index", last_included_index)

@@ -4,3 +4,4 @@ snapshot.json
 snapshot.json.tmp
 __pycache__/
 *.pyc
+.pytest_cache/

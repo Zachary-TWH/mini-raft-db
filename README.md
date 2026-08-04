@@ -1,8 +1,8 @@
 # kv-store
 
-A small distributed key-value store, built to learn Raft by implementing (most of) it.
+A small distributed key-value store I built to actually learn Raft, instead of just reading the paper.
 
-Five FastAPI nodes talk to each other over HTTP. One is elected leader at a time; writes go through the leader and get replicated to a majority of the cluster before they're acknowledged. Reads are served locally by whichever node you hit.
+Five (or more, now) FastAPI nodes talk to each other over HTTP. One is elected leader at a time. Writes go through the leader and need a majority of the cluster to replicate before they're acknowledged. Reads are served by the leader too, after it double-checks it's still actually the leader.
 
 ## Running it
 
@@ -17,29 +17,39 @@ curl -X PUT "http://localhost:8001/put/foo?value=bar"
 curl http://localhost:8002/get/foo
 ```
 
-You can hit any node for a write — if it's not the leader, it forwards the request to whoever is.
+You can hit any node for a write — if it's not the leader, it forwards to whoever is.
 
 ## How it works
 
-**Leader election.** Every node runs its own election timer with a randomized timeout. If a node doesn't hear from a leader in time, it becomes a candidate, votes for itself, and asks the rest of the cluster for votes. Whoever gets a majority becomes leader. Split votes happen occasionally when two nodes' timers fire close together — that's expected, they just back off and retry with a fresh random timeout.
+**Leader election.** Every node has its own randomized election timer. No heartbeat in time -> becomes a candidate, votes for itself, asks everyone else for a vote. Majority wins. There's a pre-vote step before any of this touches real state, so a node that can't actually win doesn't bump the term and cause pointless re-elections.
 
-**Replication.** This is leader-driven, not follower-pull. The leader tracks, per follower, what it thinks that follower has (`nextIndex`) and what's confirmed (`matchIndex`), and pushes missing log entries on a fixed tick (every 0.5s). There's a consistency check on each push (`prevLogIndex`/`prevLogTerm`) so a follower only accepts entries that connect cleanly to its own log — anything conflicting gets truncated and overwritten with the leader's version. This same mechanism handles both routine replication and a follower catching up after being down for a while — there's no separate "recovery mode," it's just what replication looks like when the gap happens to be bigger.
+**Replication.** Leader-driven. It tracks per-follower `nextIndex`/`matchIndex`, and pushes missing entries on a fixed 0.5s tick. Each push includes a consistency check (`prevLogIndex`/`prevLogTerm`) — if a follower's log doesn't line up, its entries get truncated and overwritten with the leader's version.
 
-**Commits.** A write is appended to the leader's log immediately, but the client doesn't get a response until a majority of the cluster has replicated it. Once that happens, the leader applies it to its own store, writes it to disk, and tells followers the new commit point on the next tick so they apply it too.
+**Commits.** A write lands in the leader's log immediately but isn't acknowledged until a majority has it. Only then does the leader apply it locally and let followers know the new commit point on the next tick.
 
-**Heartbeats.** There's no separate heartbeat RPC — an AppendEntries call with an empty entry list *is* the heartbeat. Receiving one resets a follower's election timer.
+**Reads.** Before answering a `GET`, the leader has to confirm — live, right now — that it can still reach a majority of the cluster. If it can't (say it got partitioned off and doesn't know it yet), it returns a 503 instead of quietly serving a stale value. This is what stops the classic "old leader still thinks it's leader and answers with old data" bug.
 
-## Known gaps / things I'd do differently with more time
+**Snapshots.** Every 5 commits, the leader dumps the whole store to `snapshot.json` and truncates the log. Restarting a node loads the snapshot first, then replays whatever log entries came after it. If a follower has fallen too far behind for normal replication to catch it up (the entries it needs got compacted away), the leader sends it the whole snapshot instead (`InstallSnapshot`).
 
-- No log compaction. `w2.log` grows forever and gets fully replayed on every restart. Real systems snapshot state periodically and truncate the log.
-- No `InstallSnapshot` RPC — if a follower falls far enough behind that it needs entries the leader has already compacted away, this design has no way to recover it (moot right now since there's no compaction, but it's the next problem once there is).
-- The `/put` endpoint blocks a request thread polling for commit every 50ms instead of using a proper wakeup/callback. Works, but wastes a thread per in-flight write.
-- Cluster membership (`PEERS`) is static. Adding or removing a node safely needs Raft's joint-consensus approach, which isn't implemented here.
-- Reads aren't linearizable — a partitioned-away former leader, or a follower that hasn't caught up yet, will happily answer a `/get` with stale data. A real implementation would need a lease or read-index mechanism to guarantee reads reflect the latest commit.
+**Cluster membership can change while running.** This was the big addition — nodes can be added or removed without restarting the cluster.
+
+- `PUT /add_node?address=http://node6:8000`
+- `PUT /remove_node?address=http://node2:8000`
+
+Under the hood this is joint consensus: a membership change is just a special log entry (`type: "config"` instead of `type: "data"`). The leader first commits a "joint" entry that says both the old and new membership are active — during this window, quorum needs a majority of *both* groups, not just one. Once that's safely committed, it commits a follow-up entry that finalizes the new membership on its own. This two-step dance is what stops a single node from having contradictory opinions about who's in the cluster during the switch.
+
+A brand new node added this way starts with nothing — empty log, empty store. It gets caught up the same way a node returning from a long outage would: either normal replication if it's not too far behind, or a full `InstallSnapshot` if it is.
+
+## Things I know are missing / half-baked
+
+- **Leader removing itself from the cluster isn't handled.** If you remove the currently-active leader's own address, it just keeps leading a cluster it's technically no longer part of. Real Raft has it step down once that config entry commits. Skipped it — the actual usage pattern here (you calling the endpoints yourself) means you'd never realistically remove the node you're talking to.
+- **`/put` blocks a request thread, polling every 50ms** waiting for its own write to commit, instead of a proper callback/wakeup. Works fine at this scale, wastes a thread per in-flight write.
+- **Snapshotting mid-joint-phase is untested.** Everything else about joint consensus has been tested against a live cluster (add, remove, elections, node failures during both), but I haven't specifically forced a snapshot to happen while a config change is half-committed.
+- No real security — nodes trust each other completely, no auth on anything.
 
 ## Files
 
-- `node.py` — HTTP routes (`/put`, `/get`, `/vote`, `/internal/append_entries`, ...)
-- `consensus.py` — term/vote bookkeeping, election logic
-- `cluster.py` — peer list, leader tracking, the replication loop
-- `storage.py` — in-memory store + append-only log on disk
+- `node.py` — HTTP routes (`/put`, `/get`, `/vote`, `/add_node`, `/remove_node`, `/internal/append_entries`, ...)
+- `consensus.py` — term/vote bookkeeping, election + pre-vote logic
+- `cluster.py` — membership (`OLD_CONFIG`/`NEW_CONFIG`), replication loop, joint-quorum math
+- `storage.py` — in-memory store, append-only log, snapshots, config-entry application

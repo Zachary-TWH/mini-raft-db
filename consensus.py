@@ -14,6 +14,10 @@ def handle_pre_vote_request(candidate, term, candidate_log_index, candidate_log_
     Answer 'would you vote for me if I asked for real' — WITHOUT touching
     CURRENT_TERM, VOTED_TERM, or VOTED_FOR. Pure hypothetical check.
     """
+    if candidate not in cluster.all_known_peers():
+        return {"vote_granted": False}
+
+
     log_ok = (candidate_log_term > my_log_term) or (
         candidate_log_term == my_log_term and candidate_log_index >= my_log_index
     )

@@ -24,6 +24,11 @@ def recover_from_log():
         LAST_INCLUDED_TERM = snapshot_data["last_included_term"]
         COMMIT_INDEX = LAST_INCLUDED_INDEX
 
+        if "old_config" in snapshot_data:
+            import cluster
+            cluster.OLD_CONFIG = snapshot_data["old_config"]
+            cluster.NEW_CONFIG = snapshot_data["new_config"]
+
         print("Recovered from snapshot at index", LAST_INCLUDED_INDEX)
 
     # Step 2: replay whatever's left in the log (entries after the snapshot point)
@@ -157,15 +162,15 @@ def apply_committed(index):
             take_snapshot()    
 
 def take_snapshot():
-
-    #Serialize current store + COMMIT_INDEX to disk, then truncate the log
-    #up to COMMIT_INDEX. Auto-triggered from apply_committed every 5 commits.#"""
     global LOG_ENTRIES, LAST_INCLUDED_INDEX, LAST_INCLUDED_TERM
 
+    import cluster
     snapshot_data = {
         "store": store,
         "last_included_index": COMMIT_INDEX,
-        "last_included_term": term_at(COMMIT_INDEX)
+        "last_included_term": term_at(COMMIT_INDEX),
+        "old_config": cluster.OLD_CONFIG,
+        "new_config": cluster.NEW_CONFIG
     }
 
     # Write safely: temp file first, then atomic rename
@@ -190,15 +195,9 @@ def take_snapshot():
 
 
 def install_snapshot(last_included_index, last_included_term, incoming_store):
-    """
-    Follower-side: overwrite our own state with a snapshot the leader sent,
-    because we've fallen too far behind for normal AppendEntries to help
-    (the entries we need were already truncated on the leader's side).
-    """
     global LOG_ENTRIES, COMMIT_INDEX, LAST_INCLUDED_INDEX, LAST_INCLUDED_TERM
 
     if last_included_index <= LAST_INCLUDED_INDEX:
-        # We already have this snapshot (or a newer one) — nothing to do.
         return
 
     store.clear()
@@ -210,12 +209,15 @@ def install_snapshot(last_included_index, last_included_term, incoming_store):
     LAST_INCLUDED_TERM = last_included_term
     COMMIT_INDEX = max(COMMIT_INDEX, last_included_index)
 
+    import cluster
     tmp_file = SNAPSHOT_FILE + ".tmp"
     with open(tmp_file, "w") as f:
         json.dump({
             "store": store,
             "last_included_index": last_included_index,
-            "last_included_term": last_included_term
+            "last_included_term": last_included_term,
+            "old_config": cluster.OLD_CONFIG,
+            "new_config": cluster.NEW_CONFIG
         }, f)
     os.replace(tmp_file, SNAPSHOT_FILE)
 

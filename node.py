@@ -165,8 +165,9 @@ def get(key: str):
 
     read_index = storage.COMMIT_INDEX
 
-    if not cluster.confirm_leadership(MY_ADDRESS, current_term()):
-        raise HTTPException(status_code=503, detail="Could not confirm leadership — try again")
+    if not cluster.lease_valid():
+        if not cluster.confirm_leadership(MY_ADDRESS, current_term()):
+            raise HTTPException(status_code=503, detail="Could not confirm leadership — try again")
 
     # Rare edge case: make sure our own commit has caught up to the point
     # we recorded before confirming leadership.

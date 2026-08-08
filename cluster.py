@@ -17,9 +17,15 @@ OLD_CONFIG = list(PEERS)   # starts as your current 5-node list
 NEW_CONFIG = None          # None = no config change in progress
 LEADER = "http://node1:8000"
 LAST_HEARTBEAT = time.time()
+LEASE_DURATION = 4.0   # seconds — must stay well under election timeout (10-25s)
+LEASE_EXPIRES_AT = 0
 
 next_index = {}   # peer -> next log index the leader will send that peer
 match_index = {}  # peer -> highest log index known replicated on that peer
+
+
+def lease_valid():
+    return time.time() < LEASE_EXPIRES_AT
 
 def set_leader(new_leader):
     global LEADER
@@ -121,16 +127,19 @@ def advance_commit_index(my_address, current_term):
             break
 
 def replication_loop(my_address, current_term_getter):
+    global LEASE_EXPIRES_AT
     while True:
         if my_address == LEADER:
             client = httpx.Client()
             threads = []
+            results = {}
+
+            def wrap(peer):
+                results[peer] = replicate_to_peer(client, my_address, peer, current_term_getter())
+
             for peer in all_known_peers():
                 if peer != my_address:
-                    t = threading.Thread(
-                        target=replicate_to_peer,
-                        args=(client, my_address, peer, current_term_getter())
-                    )
+                    t = threading.Thread(target=wrap, args=(peer,))
                     t.start()
                     threads.append(t)
 
@@ -138,6 +147,13 @@ def replication_loop(my_address, current_term_getter):
                 t.join(timeout=2.0)
 
             client.close()
+
+            acked = {my_address}
+            acked.update(peer for peer, ok in results.items() if ok)
+
+            if quorum_met(acked):
+                LEASE_EXPIRES_AT = time.time() + LEASE_DURATION
+
             advance_commit_index(my_address, current_term_getter())
         time.sleep(0.5)
 

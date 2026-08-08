@@ -1,4 +1,6 @@
 
+import time
+
 import httpx
 import cluster
 
@@ -17,7 +19,10 @@ def handle_pre_vote_request(candidate, term, candidate_log_index, candidate_log_
     if candidate not in cluster.all_known_peers():
         return {"vote_granted": False}
 
-
+    time_since_heartbeat = time.time() - cluster.LAST_HEARTBEAT
+    if time_since_heartbeat < cluster.LEASE_DURATION:
+        return {"vote_granted": False}
+    
     log_ok = (candidate_log_term > my_log_term) or (
         candidate_log_term == my_log_term and candidate_log_index >= my_log_index
     )
@@ -37,6 +42,11 @@ def handle_vote_request(candidate, term, candidate_log_index, candidate_log_term
     global CURRENT_TERM, VOTED_TERM, VOTED_FOR, STATE
 
     if candidate not in cluster.all_known_peers():
+        return {"term": CURRENT_TERM, "vote_for": None}
+
+    time_since_heartbeat = time.time() - cluster.LAST_HEARTBEAT
+    if time_since_heartbeat < cluster.LEASE_DURATION:
+        print("Rejecting vote — still within old leader's lease window:", time_since_heartbeat)
         return {"term": CURRENT_TERM, "vote_for": None}
     
     # If the candidate's term is greater than our current term, we update our term and reset our vote.

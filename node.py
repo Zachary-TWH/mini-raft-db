@@ -96,6 +96,7 @@ def append_entries(req: AppendEntriesRequest):
     # reassign our term and state to follower if the leader's term is greater than ours
     consensus.CURRENT_TERM = req.term
     consensus.STATE = "follower"   # a valid leader exists — stop being a candidate
+    cluster.LEASE_EXPIRES_AT = 0  
     cluster.set_leader(req.leader)
     cluster.note_heartbeat()
 
@@ -186,6 +187,7 @@ def install_snapshot(req: InstallSnapshotRequest):
 
     consensus.CURRENT_TERM = req.term
     consensus.STATE = "follower"
+    cluster.LEASE_EXPIRES_AT = 0   # any lease we held as ex-leader is no longer trustworthy
     cluster.set_leader(req.leader)
     cluster.note_heartbeat()
 

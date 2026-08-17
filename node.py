@@ -230,3 +230,11 @@ def remove_node(address: str):
     if success:
         return {"status": "removed", "new_config": cluster.OLD_CONFIG}
     raise HTTPException(status_code=503, detail="Config change did not commit in time")
+
+@app.get("/whoami")
+def whoami():
+    return {
+        "address": MY_ADDRESS,
+        "is_leader": MY_ADDRESS == cluster.LEADER,
+        "leader": cluster.LEADER
+    }

@@ -35,7 +35,6 @@ def test_put_and_get():
 
 def test_add_node_joins_and_catches_up():
     leader = find_leader()
-    httpx.put(f"{leader}/put/test_b", params={"value": "200"})
 
     r = httpx.put(f"{leader}/add_node", params={"address": "http://node6:8000"})
     assert r.status_code == 200

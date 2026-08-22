@@ -1,55 +1,31 @@
-# kv-store
-
-A small distributed key-value store I built to actually learn Raft, instead of just reading the paper.
-
-Five (or more, now) FastAPI nodes talk to each other over HTTP. One is elected leader at a time. Writes go through the leader and need a majority of the cluster to replicate before they're acknowledged. Reads are served by the leader too, after it double-checks it's still actually the leader.
-
-## Running it
-
-```
-docker compose up --build
-```
-
-Five nodes come up on ports 8001-8005, mapped to `node1`-`node5` internally.
-
-```
-curl -X PUT "http://localhost:8001/put/foo?value=bar"
-curl http://localhost:8002/get/foo
-```
-
-You can hit any node for a write — if it's not the leader, it forwards to whoever is.
 
 ## How it works
 
-**Leader election.** Every node has its own randomized election timer. No heartbeat in time -> becomes a candidate, votes for itself, asks everyone else for a vote. Majority wins. There's a pre-vote step before any of this touches real state, so a node that can't actually win doesn't bump the term and cause pointless re-elections.
+**Leader election.** Every node runs its own election timer with a randomized timeout. Before running a real election a node does a pre-vote round first — checks if it'd plausibly win before bumping its own term, so a partitioned node rejoining doesn't disrupt the cluster with a term it can't back up. Followers also won't vote for anyone within a short window after their last heartbeat, so a leader's lease can't be undercut by a stray timer firing early. Whoever gets a real majority becomes leader.
 
-**Replication.** Leader-driven. It tracks per-follower `nextIndex`/`matchIndex`, and pushes missing entries on a fixed 0.5s tick. Each push includes a consistency check (`prevLogIndex`/`prevLogTerm`) — if a follower's log doesn't line up, its entries get truncated and overwritten with the leader's version.
+**Replication.** Leader-driven, not follower-pull. The leader tracks, per follower, what it thinks that follower has (`nextIndex`) and what's confirmed (`matchIndex`), and pushes missing log entries on a fixed tick (every 0.5s). There's a consistency check on each push (`prevLogIndex`/`prevLogTerm`) so a follower only accepts entries that connect cleanly to its own log — anything conflicting gets truncated and overwritten with the leader's version. A follower that's fallen too far behind (past what the leader still has in its log) gets caught up via a full snapshot instead — same mechanism, no separate "recovery mode."
 
-**Commits.** A write lands in the leader's log immediately but isn't acknowledged until a majority has it. Only then does the leader apply it locally and let followers know the new commit point on the next tick.
+**Commits.** A write is appended to the leader's log immediately, but the client doesn't get a response until a majority has replicated it. Once that happens, the leader applies it to its own store, writes it to disk, and tells followers the new commit point on the next tick.
 
-**Reads.** Before answering a `GET`, the leader has to confirm — live, right now — that it can still reach a majority of the cluster. If it can't (say it got partitioned off and doesn't know it yet), it returns a 503 instead of quietly serving a stale value. This is what stops the classic "old leader still thinks it's leader and answers with old data" bug.
+**Heartbeats.** No separate heartbeat RPC — an AppendEntries call with an empty entry list *is* the heartbeat. A successful round of heartbeats to a majority also renews the leader's read lease.
 
-**Snapshots.** Every 5 commits, the leader dumps the whole store to `snapshot.json` and truncates the log. Restarting a node loads the snapshot first, then replays whatever log entries came after it. If a follower has fallen too far behind for normal replication to catch it up (the entries it needs got compacted away), the leader sends it the whole snapshot instead (`InstallSnapshot`).
+**Linearizable reads.** A `/get` first checks if the leader's lease is still valid (cheap, just a timestamp check) and answers immediately if so. If the lease has expired, it falls back to confirming leadership with a live round-trip to a majority before answering. Either way, a stale leader can't serve an outdated value without knowing it's stale.
 
-**Cluster membership can change while running.** This was the big addition — nodes can be added or removed without restarting the cluster.
+**Cluster membership changes.** Adding or removing a node goes through joint consensus — a config entry that activates both the old and new membership at once (so quorum during the transition needs a majority of *both* groups), followed by a second entry that finalizes the new membership alone. This goes through the log exactly like a normal write, so it's replicated, ordered, and crash-safe the same way. A brand-new node starts with nothing and catches up via snapshot once it's added.
 
-- `PUT /add_node?address=http://node6:8000`
-- `PUT /remove_node?address=http://node2:8000`
+**Snapshots.** Every 5 commits, the leader (and each follower independently, once it applies the same index) serializes the current store + cluster membership to `snapshot.json` and truncates the log up to that point. `w2.log` only ever holds entries since the last snapshot, so a restart replays a bounded amount of history instead of the whole log.
 
-Under the hood this is joint consensus: a membership change is just a special log entry (`type: "config"` instead of `type: "data"`). The leader first commits a "joint" entry that says both the old and new membership are active — during this window, quorum needs a majority of *both* groups, not just one. Once that's safely committed, it commits a follow-up entry that finalizes the new membership on its own. This two-step dance is what stops a single node from having contradictory opinions about who's in the cluster during the switch.
+## Known gaps / things I'd do differently with more time
 
-A brand new node added this way starts with nothing — empty log, empty store. It gets caught up the same way a node returning from a long outage would: either normal replication if it's not too far behind, or a full `InstallSnapshot` if it is.
-
-## Things I know are missing / half-baked
-
-- **Leader removing itself from the cluster isn't handled.** If you remove the currently-active leader's own address, it just keeps leading a cluster it's technically no longer part of. Real Raft has it step down once that config entry commits. Skipped it — the actual usage pattern here (you calling the endpoints yourself) means you'd never realistically remove the node you're talking to.
-- **`/put` blocks a request thread, polling every 50ms** waiting for its own write to commit, instead of a proper callback/wakeup. Works fine at this scale, wastes a thread per in-flight write.
-- **Snapshotting mid-joint-phase is untested.** Everything else about joint consensus has been tested against a live cluster (add, remove, elections, node failures during both), but I haven't specifically forced a snapshot to happen while a config change is half-committed.
-- No real security — nodes trust each other completely, no auth on anything.
+- If the leader removes itself from the cluster via `/remove_node`, it doesn't step down — it'll keep acting as leader for a group it's no longer technically part of. Only add/remove-others is handled safely; self-removal is a known unhandled edge case.
+- The `/put` endpoint blocks a request thread polling for commit every 50ms instead of using a proper wakeup/callback. Works, but wastes a thread per in-flight write.
+- No compare-and-swap or transactions — every write is unconditional. Fine for this project since nothing here actually needs conditional writes yet, but it's the natural next primitive if two clients ever needed to race for the same key safely.
+- Test coverage is a handful of integration tests hitting a live cluster (`test_cluster.py`) — good for catching obvious regressions, but nowhere near enough to catch narrow timing races (e.g. the handful of race conditions found and fixed during development). Real coverage for that would need something closer to fault injection / chaos testing.
 
 ## Files
 
-- `node.py` — HTTP routes (`/put`, `/get`, `/vote`, `/add_node`, `/remove_node`, `/internal/append_entries`, ...)
-- `consensus.py` — term/vote bookkeeping, election + pre-vote logic
-- `cluster.py` — membership (`OLD_CONFIG`/`NEW_CONFIG`), replication loop, joint-quorum math
-- `storage.py` — in-memory store, append-only log, snapshots, config-entry application
+- `node.py` — HTTP routes (`/put`, `/get`, `/cas`... wait no, drop that — `/vote`, `/pre_vote`, `/internal/append_entries`, `/internal/install_snapshot`, `/add_node`, `/remove_node`, `/whoami`, ...)
+- `consensus.py` — term/vote bookkeeping, election and pre-vote logic
+- `cluster.py` — cluster membership (`OLD_CONFIG`/`NEW_CONFIG`), leader tracking, replication loop, lease state
+- `storage.py` — in-memory store + append-only log + snapshotting on disk
+- `kv_client.py` — small Python client that finds the working node automatically

@@ -1,6 +1,7 @@
 
 import json
 import os
+import threading
 
 LOG_FILE = "w2.log"
 store = {}
@@ -9,6 +10,7 @@ COMMIT_INDEX = 0
 SNAPSHOT_FILE = "snapshot.json"
 LAST_INCLUDED_INDEX = 0
 LAST_INCLUDED_TERM = 0
+COMMIT_CONDITION = threading.Condition()
 
 # Storage API
 def recover_from_log():
@@ -137,7 +139,6 @@ def append_entries_from_leader(prev_log_index, prev_log_term, entries, leader_co
     return True
 
 def apply_committed(index):
-    """Advance COMMIT_INDEX up to `index`, applying entries to store + disk."""
     global COMMIT_INDEX
 
     for i in range(COMMIT_INDEX + 1, index + 1):
@@ -158,8 +159,12 @@ def apply_committed(index):
 
         COMMIT_INDEX = i
         print("COMMITTED:", i)
+
+        with COMMIT_CONDITION:
+            COMMIT_CONDITION.notify_all()
+            
         if COMMIT_INDEX % 5 == 0:
-            take_snapshot()    
+            take_snapshot()
 
 def take_snapshot():
     global LOG_ENTRIES, LAST_INCLUDED_INDEX, LAST_INCLUDED_TERM

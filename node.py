@@ -81,12 +81,14 @@ def put(key: str, value: str):
     # The replication_loop pushes this out and advances COMMIT_INDEX on its
     # own tick; we just wait here for it to catch up to our entry.
     deadline = time.time() + 5.0
-    while time.time() < deadline:
-        if storage.COMMIT_INDEX >= entry["index"]:
-            return {"stored": key, "index": entry["index"]}
-        time.sleep(0.05)
+    with storage.COMMIT_CONDITION:
+        while storage.COMMIT_INDEX < entry["index"]:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise HTTPException(status_code=503, detail="Commit timed out")
+            storage.COMMIT_CONDITION.wait(timeout=remaining)
 
-    raise HTTPException(status_code=503, detail="Commit timed out")
+    return {"stored": key, "index": entry["index"]}
 
 @app.put("/internal/append_entries")
 def append_entries(req: AppendEntriesRequest):

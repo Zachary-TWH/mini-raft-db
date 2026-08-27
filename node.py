@@ -225,7 +225,7 @@ def remove_node(address: str):
 
     if address not in cluster.OLD_CONFIG:
         raise HTTPException(status_code=400, detail="Address not in current config")
-
+  
     new_members = [p for p in cluster.OLD_CONFIG if p != address]
     success = cluster.start_config_change(MY_ADDRESS, current_term(), new_members)
 

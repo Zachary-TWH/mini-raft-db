@@ -15,7 +15,7 @@
 
 **Snapshots.** Every 5 commits, the leader (and each follower independently, once it applies the same index) serializes the current store + cluster membership to `snapshot.json` and truncates the log up to that point. `w2.log` only ever holds entries since the last snapshot, so a restart replays a bounded amount of history instead of the whole log.
 
-## Known gaps / things I'd do differently with more time
+## Known gaps
 
 - If the leader removes itself from the cluster via `/remove_node`, it doesn't step down — it'll keep acting as leader for a group it's no longer technically part of. Only add/remove-others is handled safely; self-removal is a known unhandled edge case.
 - The `/put` endpoint blocks a request thread polling for commit every 50ms instead of using a proper wakeup/callback. Works, but wastes a thread per in-flight write.

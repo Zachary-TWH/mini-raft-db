@@ -1,6 +1,6 @@
 # mini-raft-db
 
-A small key-value store built on top of a simplified Raft consensus implementation. Multiple nodes replicate writes and elect a leader automatically, so the cluster keeps working even if some nodes go down.
+A small key-value store built on top of a simplified Raft consensus implementation. Multiple nodes replicate writes and elect a leader automatically, so the cluster keeps working even if some nodes go down. Built from scratch as a learning project to understand the Raft consensus algorithm, not intended for production use.
 
 ## How it works
 

@@ -125,7 +125,7 @@ def append_entries_from_leader(prev_log_index, prev_log_term, entries, leader_co
         # if existing data and its term don't match, delete everything from that index onwards
         if existing and existing["term"] != entry["term"]:
 
-            del LOG_ENTRIES [entry["index"] - 1:]
+            del LOG_ENTRIES[entry["index"] - 1 - LAST_INCLUDED_INDEX:]
 
             existing = None
         # and append new entry
